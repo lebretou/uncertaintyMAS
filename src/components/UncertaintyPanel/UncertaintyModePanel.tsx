@@ -6,12 +6,15 @@ import { UncertaintyToggle } from './UncertaintyToggle';
 import { PresetManager } from './PresetManager';
 import { PipelineSelector } from '@components/Controls/PipelineSelector';
 import { CSVUpload } from '@components/Controls/CSVUpload';
+import { UserPromptInput } from '@components/Controls/UserPromptInput';
 
 interface UncertaintyModePanelProps {
   pipelineId: string;
   onPipelineChange: (pipelineId: string) => void;
   onCSVLoad: (csvData: string, fileName: string) => void;
   csvFileName?: string;
+  userPrompt: string;
+  onUserPromptChange: (prompt: string) => void;
 }
 
 export const UncertaintyModePanel: React.FC<UncertaintyModePanelProps> = ({
@@ -19,6 +22,8 @@ export const UncertaintyModePanel: React.FC<UncertaintyModePanelProps> = ({
   onPipelineChange,
   onCSVLoad,
   csvFileName,
+  userPrompt,
+  onUserPromptChange,
 }) => {
   const {
     config,
@@ -62,6 +67,14 @@ export const UncertaintyModePanel: React.FC<UncertaintyModePanelProps> = ({
           <CSVUpload
             onCSVLoad={onCSVLoad}
             currentFileName={csvFileName}
+          />
+        </div>
+
+        {/* User Prompt */}
+        <div className="border-b border-gray-200 pb-4">
+          <UserPromptInput
+            value={userPrompt}
+            onChange={onUserPromptChange}
           />
         </div>
 

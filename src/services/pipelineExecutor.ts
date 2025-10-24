@@ -3,16 +3,10 @@ import { callLLM } from './llmService';
 import { useTraceStore } from './traceStore';
 import { useUncertaintyStore } from './uncertaintyStore';
 import { useNodeStatusStore } from './nodeStatusStore';
-import { AGENT_DEFINITIONS, getAgentById } from '@config/agentDefinitions';
-import { ExecutionResult, RunConfiguration } from '@/types/pipeline';
-
-// Sample CSV data for testing
-const SAMPLE_CSV_DATA = `name,age,city,salary
-John Doe,28,New York,75000
-Jane Smith,34,San Francisco,95000
-Bob Johnson,45,Chicago,82000
-Alice Williams,29,Boston,68000
-Charlie Brown,52,Seattle,105000`;
+import { getPipelineById, getAgentFromPipeline } from '@config/pipelines';
+import { ExecutionResult, RunConfiguration, AgentDefinition } from '@/types/pipeline';
+import { saveCSVData, StoredDataFile } from './dataStorage';
+import { executePython, parseExecutionOutput } from './pythonExecutor';
 
 export interface ExecutionProgress {
   phase: string; // e.g., "Running Ingest agents", "Running downstream agents"
@@ -27,16 +21,14 @@ export type ProgressCallback = (progress: ExecutionProgress) => void;
  * Execute a single agent
  */
 async function executeAgent(
-  agentId: string,
+  agent: AgentDefinition,
   input: unknown,
   traceId: string,
   executionNumber: number,
   progressCallback?: ProgressCallback
 ): Promise<ExecutionResult> {
-  const agent = getAgentById(agentId);
-
   if (!agent) {
-    throw new Error(`Agent not found: ${agentId}`);
+    throw new Error(`Agent not provided`);
   }
 
   const executionId = nanoid();
@@ -67,12 +59,24 @@ async function executeAgent(
     // Prepare user message based on input
     let userMessage: string;
 
-    if (agent.id === 'ingest') {
-      // First agent receives CSV data
-      userMessage = `Please analyze the following CSV data:\n\n${input}`;
+    // Check if this is a root agent (receives the initial input object with file path)
+    if (typeof input === 'object' && input !== null && 'dataFilePath' in input && 'userPrompt' in input) {
+      // Root agent receives structured initial input with file path
+      const { dataFilePath, userPrompt, csvFileName } = input as {
+        dataFilePath: string;
+        userPrompt: string;
+        csvFileName?: string;
+      };
+
+      userMessage = `User's analysis task: ${userPrompt}\n\n`;
+      if (csvFileName) {
+        userMessage += `Original CSV file: ${csvFileName}\n\n`;
+      }
+      userMessage += `Data file path: ${dataFilePath}\n\n`;
+      userMessage += `Please generate Python code to analyze the data at this file path. Replace 'DATA_FILE_PATH' in your code with: ${dataFilePath}`;
     } else {
       // Downstream agents receive output from upstream agents
-      userMessage = `Based on the following input:\n\n${JSON.stringify(input, null, 2)}\n\nPlease perform your analysis.`;
+      userMessage = `Based on the following input from the previous agent:\n\n${JSON.stringify(input, null, 2)}\n\nPlease perform your analysis.`;
     }
 
     // Call LLM
@@ -84,9 +88,77 @@ async function executeAgent(
       temperature: agent.temperature,
     });
 
+    // Parse LLM response
+    let llmOutput: any;
+    try {
+      llmOutput = JSON.parse(response.content);
+    } catch (e) {
+      // If not JSON, check if it contains Python code in markdown format
+      const pythonCodeMatch = response.content.match(/```python\n([\s\S]*?)```/);
+      if (pythonCodeMatch) {
+        // Extract Python code from markdown
+        llmOutput = {
+          pythonCode: pythonCodeMatch[1],
+          rawOutput: response.content
+        };
+      } else {
+        // If not JSON and no Python code, treat as plain text
+        llmOutput = { rawOutput: response.content };
+      }
+    }
+
+    // Check if the LLM generated Python code that needs execution
+    let finalOutput = llmOutput;
+    if (llmOutput.pythonCode && typeof llmOutput.pythonCode === 'string') {
+      console.log(`Agent ${agent.id} generated Python code, executing...`);
+
+      // Extract file path - could be from initial input or from upstream agent's dataRef
+      let filePathToUse: string | undefined;
+      if (typeof input === 'object' && input !== null) {
+        if ('dataFilePath' in input) {
+          // Root agent - has original file path
+          filePathToUse = (input as any).dataFilePath;
+        } else if ('dataRef' in input) {
+          // Downstream agent - has dataRef from previous agent
+          filePathToUse = (input as any).dataRef;
+        } else if ('contextPacket' in input && 'dataRef' in (input as any).contextPacket) {
+          // Has context packet with dataRef
+          filePathToUse = (input as any).contextPacket.dataRef;
+        }
+      }
+
+      // Execute the Python code
+      const pythonResult = await executePython(llmOutput.pythonCode, filePathToUse);
+
+      if (pythonResult.success && pythonResult.output) {
+        // Parse execution output
+        const executedData = parseExecutionOutput(pythonResult.output);
+
+        // Combine LLM output with execution results
+        finalOutput = {
+          ...llmOutput,
+          executionResult: executedData,
+          pythonExecutionTime: pythonResult.executionTime,
+          // Use the actual execution results as the output for downstream agents
+          ...executedData,
+        };
+
+        console.log(`Python execution successful for agent ${agent.id}`);
+      } else {
+        // Execution failed, include error
+        finalOutput = {
+          ...llmOutput,
+          executionError: pythonResult.error,
+          pythonExecutionTime: pythonResult.executionTime,
+        };
+
+        console.error(`Python execution failed for agent ${agent.id}:`, pythonResult.error);
+      }
+    }
+
     // Update execution result
     const updatedResult: Partial<ExecutionResult> = {
-      output: response.content,
+      output: finalOutput,
       executionTime: response.executionTime,
       tokenUsage: response.tokenUsage,
     };
@@ -121,57 +193,82 @@ async function executeAgent(
 }
 
 /**
+ * Execute agents recursively following the pipeline DAG structure
+ */
+async function executeAgentRecursive(
+  agent: AgentDefinition,
+  allAgents: AgentDefinition[],
+  input: unknown,
+  traceId: string,
+  run: number,
+  executedResults: Map<string, ExecutionResult>,
+  onAgentComplete?: () => void
+): Promise<void> {
+  // Execute current agent
+  const result = await executeAgent(agent, input, traceId, run);
+  executedResults.set(agent.id, result);
+  onAgentComplete?.();
+
+  // If this agent has downstream nodes, execute them
+  if (agent.downstreamNodeIds && agent.downstreamNodeIds.length > 0) {
+    const downstreamAgents = agent.downstreamNodeIds
+      .map(id => allAgents.find(a => a.id === id))
+      .filter((a): a is AgentDefinition => a !== undefined);
+
+    // Execute all downstream agents in parallel
+    await Promise.all(
+      downstreamAgents.map(downstreamAgent =>
+        executeAgentRecursive(
+          downstreamAgent,
+          allAgents,
+          result.output, // Pass current agent's output as input
+          traceId,
+          run,
+          executedResults,
+          onAgentComplete
+        )
+      )
+    );
+  }
+}
+
+/**
  * Execute a single run of the pipeline
  */
 async function executeSingleRun(
   run: number,
   runCount: number,
   traceId: string,
+  pipeline: AgentDefinition[],
+  initialInput: unknown,
   onAgentComplete?: () => void
 ): Promise<void> {
   console.log(`Starting independent run ${run}/${runCount}`);
 
-  // Execute Ingest once per run (it branches to both routes)
-  let ingestResult: ExecutionResult;
-  try {
-    ingestResult = await executeAgent('ingest', SAMPLE_CSV_DATA, traceId, run);
-    onAgentComplete?.();
-  } catch (error) {
-    console.error(`Error in Ingest (run ${run}):`, error);
-    onAgentComplete?.();
-    return; // Skip this run if ingest fails
-  }
+  // Find root agents (agents with no upstream dependencies)
+  const rootAgents = pipeline.filter(agent =>
+    !pipeline.some(other => other.downstreamNodeIds.includes(agent.id))
+  );
 
-  // Execute both routes in parallel after ingest completes
-  await Promise.all([
-    // Route 1: Schema Mapper
-    (async () => {
-      try {
-        await executeAgent('schema-mapper', ingestResult.output, traceId, run);
-        onAgentComplete?.();
-      } catch (error) {
-        console.error(`Error in Schema Mapper (run ${run}):`, error);
-        onAgentComplete?.();
-      }
-    })(),
+  const executedResults = new Map<string, ExecutionResult>();
 
-    // Route 2: Cleaning → Analytics → Visualization
-    (async () => {
-      try {
-        const cleaningResult = await executeAgent('cleaning', ingestResult.output, traceId, run);
+  // Execute all root agents in parallel
+  await Promise.all(
+    rootAgents.map(rootAgent =>
+      executeAgentRecursive(
+        rootAgent,
+        pipeline,
+        initialInput,
+        traceId,
+        run,
+        executedResults,
+        onAgentComplete
+      ).catch(error => {
+        console.error(`Error in agent ${rootAgent.id} (run ${run}):`, error);
         onAgentComplete?.();
-
-        const analyticsResult = await executeAgent('analytics', cleaningResult.output, traceId, run);
-        onAgentComplete?.();
-
-        await executeAgent('visualization', analyticsResult.output, traceId, run);
-        onAgentComplete?.();
-      } catch (error) {
-        console.error(`Error in Route 2 (run ${run}):`, error);
-        onAgentComplete?.();
-      }
-    })(),
-  ]);
+      })
+    )
+  );
 }
 
 /**
@@ -180,10 +277,12 @@ async function executeSingleRun(
 async function executeIndependentMode(
   runCount: number,
   traceId: string,
+  pipeline: AgentDefinition[],
+  initialInput: unknown,
   progressCallback?: ProgressCallback
 ): Promise<void> {
-  // Total agent calls: N * 5 (ingest, schema-mapper, cleaning, analytics, visualization per run)
-  const totalAgentCalls = runCount * 5;
+  // Total agent calls: N * (number of agents)
+  const totalAgentCalls = runCount * pipeline.length;
   let completedAgentCalls = 0;
 
   const updateProgress = () => {
@@ -201,7 +300,7 @@ async function executeIndependentMode(
   // Execute all runs in parallel
   const runPromises = [];
   for (let run = 1; run <= runCount; run++) {
-    runPromises.push(executeSingleRun(run, runCount, traceId, updateProgress));
+    runPromises.push(executeSingleRun(run, runCount, traceId, pipeline, initialInput, updateProgress));
   }
 
   await Promise.all(runPromises);
@@ -214,12 +313,14 @@ async function executeIndependentMode(
 async function executePropagationMode(
   runCount: number,
   traceId: string,
+  pipeline: AgentDefinition[],
+  initialInput: unknown,
   progressCallback?: ProgressCallback
 ): Promise<void> {
   console.log(`Starting propagation mode with ${runCount} runs`);
 
-  // Total agent calls: N + 2N + N + N = 5N
-  const totalAgentCalls = runCount * 5;
+  // Total agent calls: N * (number of agents)
+  const totalAgentCalls = runCount * pipeline.length;
   let completedAgentCalls = 0;
 
   const updateProgress = (phase: string) => {
@@ -234,67 +335,75 @@ async function executePropagationMode(
     }
   };
 
-  // Execute ingest N times in parallel
-  const ingestPromises = [];
-  for (let i = 0; i < runCount; i++) {
-    ingestPromises.push(
-      executeAgent('ingest', SAMPLE_CSV_DATA, traceId, i + 1).then((result) => {
-        updateProgress('Running Ingest agents');
-        return result;
-      })
-    );
-  }
-  const ingestResults = await Promise.all(ingestPromises);
+  // Find root agents (agents with no upstream dependencies)
+  const rootAgents = pipeline.filter(agent =>
+    !pipeline.some(other => other.downstreamNodeIds.includes(agent.id))
+  );
 
-  // Execute schema mapper and cleaning in parallel for all ingest results
-  const schemaMapperPromises = [];
-  const cleaningPromises = [];
+  // Execute root agents N times in parallel
+  const rootResults = new Map<string, ExecutionResult[]>();
 
-  for (let i = 0; i < ingestResults.length; i++) {
-    schemaMapperPromises.push(
-      executeAgent('schema-mapper', ingestResults[i].output, traceId, i + 1).then((result) => {
-        updateProgress('Running Schema Mapper agents');
-        return result;
-      })
-    );
-
-    cleaningPromises.push(
-      executeAgent('cleaning', ingestResults[i].output, traceId, i + 1).then((result) => {
-        updateProgress('Running Cleaning agents');
-        return result;
-      })
-    );
+  for (const rootAgent of rootAgents) {
+    const promises = [];
+    for (let i = 0; i < runCount; i++) {
+      promises.push(
+        executeAgent(rootAgent, initialInput, traceId, i + 1).then((result) => {
+          updateProgress(`Running ${rootAgent.name} agents`);
+          return result;
+        })
+      );
+    }
+    rootResults.set(rootAgent.id, await Promise.all(promises));
   }
 
-  // Wait for both schema-mapper and cleaning to complete in parallel
-  const [, cleaningResults] = await Promise.all([
-    Promise.all(schemaMapperPromises),
-    Promise.all(cleaningPromises),
-  ]);
+  // Build a map of agent results by agent ID
+  const allResults = new Map<string, ExecutionResult[]>(rootResults);
 
-  // Execute analytics for each cleaning result in parallel
-  const analyticsPromises = [];
-  for (let i = 0; i < cleaningResults.length; i++) {
-    analyticsPromises.push(
-      executeAgent('analytics', cleaningResults[i].output, traceId, i + 1).then((result) => {
-        updateProgress('Running Analytics agents');
-        return result;
-      })
-    );
-  }
-  const analyticsResults = await Promise.all(analyticsPromises);
+  // Process agents level by level (BFS approach)
+  const processedAgents = new Set<string>(rootAgents.map(a => a.id));
+  let hasMoreAgents = true;
 
-  // Execute visualization for each analytics result in parallel
-  const visualizationPromises = [];
-  for (let i = 0; i < analyticsResults.length; i++) {
-    visualizationPromises.push(
-      executeAgent('visualization', analyticsResults[i].output, traceId, i + 1).then((result) => {
-        updateProgress('Running Visualization agents');
-        return result;
-      })
+  while (hasMoreAgents) {
+    hasMoreAgents = false;
+
+    // Find agents whose upstream dependencies are all processed
+    const nextAgents = pipeline.filter(agent =>
+      !processedAgents.has(agent.id) &&
+      pipeline.some(other =>
+        other.downstreamNodeIds.includes(agent.id) &&
+        processedAgents.has(other.id)
+      )
     );
+
+    if (nextAgents.length === 0) break;
+    hasMoreAgents = true;
+
+    // Execute next level agents
+    for (const agent of nextAgents) {
+      // Find upstream agents
+      const upstreamAgents = pipeline.filter(other =>
+        other.downstreamNodeIds.includes(agent.id)
+      );
+
+      // Execute this agent N times with outputs from upstream agents
+      const promises = [];
+      for (let i = 0; i < runCount; i++) {
+        // Get input from the first upstream agent for this run
+        const upstreamResult = allResults.get(upstreamAgents[0].id)?.[i];
+        const input = upstreamResult?.output || initialInput;
+
+        promises.push(
+          executeAgent(agent, input, traceId, i + 1).then((result) => {
+            updateProgress(`Running ${agent.name} agents`);
+            return result;
+          })
+        );
+      }
+
+      allResults.set(agent.id, await Promise.all(promises));
+      processedAgents.add(agent.id);
+    }
   }
-  await Promise.all(visualizationPromises);
 }
 
 /**
@@ -307,6 +416,19 @@ export async function executePipeline(
   const { createTrace, updateTraceStatus, completeTrace } = useTraceStore.getState();
   const uncertaintyConfig = useUncertaintyStore.getState().config;
 
+  // Get the pipeline configuration
+  const pipelineConfig = getPipelineById(config.pipelineId);
+  if (!pipelineConfig) {
+    throw new Error(`Pipeline not found: ${config.pipelineId}`);
+  }
+
+  console.log(`Executing pipeline: ${pipelineConfig.name}`, {
+    runCount: config.runCount,
+    propagationMode: config.propagationMode,
+    csvData: config.csvData ? `${config.csvData.length} chars` : 'none',
+    userPrompt: config.userPrompt,
+  });
+
   // Reset all node statuses
   useNodeStatusStore.getState().resetAllStatuses();
 
@@ -316,15 +438,37 @@ export async function executePipeline(
   // Track wall-clock time for the entire execution
   const startTime = Date.now();
 
+  // Save CSV data to storage and get file path
+  const storedFile = saveCSVData(config.csvData, config.csvFileName);
+
+  // Prepare initial input for root agents with file path instead of CSV content
+  const initialInput = {
+    dataFilePath: storedFile.filePath,
+    userPrompt: config.userPrompt,
+    csvFileName: storedFile.fileName,
+  };
+
   try {
     // Update status to running
     updateTraceStatus(traceId, 'running');
 
     // Execute based on mode
     if (config.propagationMode) {
-      await executePropagationMode(config.runCount, traceId, progressCallback);
+      await executePropagationMode(
+        config.runCount,
+        traceId,
+        pipelineConfig.agents,
+        initialInput,
+        progressCallback
+      );
     } else {
-      await executeIndependentMode(config.runCount, traceId, progressCallback);
+      await executeIndependentMode(
+        config.runCount,
+        traceId,
+        pipelineConfig.agents,
+        initialInput,
+        progressCallback
+      );
     }
 
     // Calculate actual wall-clock execution time

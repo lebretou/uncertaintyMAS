@@ -1,15 +1,64 @@
 import { Node, Edge } from 'reactflow';
 import { AGENT_DEFINITIONS } from './agentDefinitions';
-import { NodeData, EdgeData } from '../types';
+import { getPipelineById } from './pipelines';
+import { NodeData, EdgeData, AgentDefinition } from '../types';
 
-// Define node positions for the pipeline layout
+// Define node positions for the pipeline layout (old hardcoded positions)
 const NODE_POSITIONS: Record<string, { x: number; y: number }> = {
   ingest: { x: 100, y: 200 },
+  summarizer: { x: 400, y: 100 },
   'schema-mapper': { x: 400, y: 100 },
   cleaning: { x: 400, y: 300 },
   analytics: { x: 700, y: 300 },
   visualization: { x: 1000, y: 300 },
+  'hypothesis-generator': { x: 400, y: 100 },
+  'pattern-finder': { x: 400, y: 300 },
+  'creative-analytics': { x: 700, y: 300 },
+  'creative-viz': { x: 1000, y: 300 },
 };
+
+/**
+ * Generate nodes and edges dynamically based on pipeline configuration
+ */
+export function generateNodesAndEdges(pipelineId: string): {
+  nodes: Node<NodeData>[];
+  edges: Edge<EdgeData>[];
+} {
+  const pipeline = getPipelineById(pipelineId);
+
+  if (!pipeline) {
+    console.warn(`Pipeline not found: ${pipelineId}, using empty pipeline`);
+    return { nodes: [], edges: [] };
+  }
+
+  // Create nodes from agent definitions
+  const nodes: Node<NodeData>[] = pipeline.agents.map((agent) => ({
+    id: agent.id,
+    type: 'default',
+    position: NODE_POSITIONS[agent.id] || { x: 0, y: 0 },
+    data: {
+      label: agent.name,
+      agentId: agent.id,
+      agentDefinition: agent,
+    },
+    draggable: true,
+  }));
+
+  // Create edges from agent downstream relationships
+  const edges: Edge<EdgeData>[] = pipeline.agents.flatMap((agent) =>
+    agent.downstreamNodeIds.map((targetId) => ({
+      id: `${agent.id}-${targetId}`,
+      source: agent.id,
+      target: targetId,
+      type: 'default',
+      animated: false,
+      style: { strokeWidth: 2, stroke: '#94a3b8' },
+      data: {},
+    }))
+  );
+
+  return { nodes, edges };
+}
 
 // Create initial nodes from agent definitions
 export const initialNodes: Node<NodeData>[] = AGENT_DEFINITIONS.map((agent) => ({
@@ -55,11 +104,3 @@ export const PIPELINE_METADATA = {
     },
   ],
 };
-
-// Mock input data for testing
-export const MOCK_CSV_DATA = `name,age,city,salary
-John Doe,28,New York,75000
-Jane Smith,34,San Francisco,95000
-Bob Johnson,45,Chicago,82000
-Alice Williams,29,Boston,78000
-Charlie Brown,52,Seattle,105000`;

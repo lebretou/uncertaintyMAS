@@ -15,6 +15,7 @@ function App() {
     pipelineId: 'deterministic',
     csvData: '',
     csvFileName: undefined,
+    userPrompt: '',
   });
 
   const [isRunning, setIsRunning] = useState(false);
@@ -26,9 +27,13 @@ function App() {
   } | null>(null);
 
   const handleRun = async () => {
-    // Validate CSV data
+    // Validate inputs
     if (!runConfig.csvData) {
       alert('Please upload a CSV file before running the pipeline');
+      return;
+    }
+    if (!runConfig.userPrompt.trim()) {
+      alert('Please describe your analysis task before running');
       return;
     }
 
@@ -135,12 +140,14 @@ function App() {
             setRunConfig({ ...runConfig, csvData, csvFileName: fileName })
           }
           csvFileName={runConfig.csvFileName}
+          userPrompt={runConfig.userPrompt}
+          onUserPromptChange={(prompt) => setRunConfig({ ...runConfig, userPrompt: prompt })}
         />
 
         {/* Main Canvas */}
         <div className="flex-1 relative">
           <ReactFlowProvider>
-            <PipelineCanvas />
+            <PipelineCanvas pipelineId={runConfig.pipelineId} />
           </ReactFlowProvider>
         </div>
       </div>

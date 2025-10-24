@@ -13,6 +13,163 @@ const renderContent = (content: unknown) => {
     return <span className="text-gray-400 italic">No content</span>;
   }
 
+  // Handle complex output from agents with Python code execution
+  if (typeof content === 'object' && content !== null) {
+    const obj = content as any;
+
+    // Special handling for agent outputs with Python code
+    if ('pythonCode' in obj || 'executionResult' in obj || 'dataRef' in obj || 'schema' in obj) {
+      return (
+        <div className="space-y-3">
+          {/* Priority: Show execution results first if available */}
+          {obj.executionResult && (
+            <div>
+              <div className="text-xs font-semibold text-green-700 mb-1">✓ Execution Result:</div>
+              <pre className="bg-green-50 p-3 rounded border border-green-200 overflow-x-auto text-xs font-mono">
+                {JSON.stringify(obj.executionResult, null, 2)}
+              </pre>
+            </div>
+          )}
+
+          {/* Show key data fields if present */}
+          {obj.dataRef && (
+            <div>
+              <div className="text-xs font-semibold text-blue-600 mb-1">Data Reference:</div>
+              <div className="text-sm font-mono bg-blue-50 p-2 rounded">{obj.dataRef}</div>
+            </div>
+          )}
+
+          {obj.schema && (
+            <div>
+              <div className="text-xs font-semibold text-purple-600 mb-1">Data Schema:</div>
+              <pre className="bg-purple-50 p-3 rounded border border-purple-200 overflow-x-auto text-xs font-mono">
+                {JSON.stringify(obj.schema, null, 2)}
+              </pre>
+            </div>
+          )}
+
+          {obj.qualityIssues && (
+            <div>
+              <div className="text-xs font-semibold text-orange-600 mb-1">Quality Issues:</div>
+              <pre className="bg-orange-50 p-3 rounded border border-orange-200 overflow-x-auto text-xs font-mono">
+                {JSON.stringify(obj.qualityIssues, null, 2)}
+              </pre>
+            </div>
+          )}
+
+          {obj.sampleRows && (
+            <div>
+              <div className="text-xs font-semibold text-gray-600 mb-1">Sample Data:</div>
+              <pre className="bg-gray-50 p-3 rounded border border-gray-200 overflow-x-auto text-xs font-mono">
+                {obj.sampleRows}
+              </pre>
+            </div>
+          )}
+
+          {/* Description */}
+          {obj.description && (
+            <div>
+              <div className="text-xs font-semibold text-gray-600 mb-1">Description:</div>
+              <div className="text-sm text-gray-700">{obj.description}</div>
+            </div>
+          )}
+
+          {/* Python Code - show collapsed by default if execution result exists */}
+          {obj.pythonCode && (
+            <details className={obj.executionResult ? "" : "open"}>
+              <summary className="text-xs font-semibold text-gray-600 mb-1 cursor-pointer hover:text-gray-800">
+                {obj.executionResult ? "▶ Generated Python Code (click to expand)" : "Generated Python Code:"}
+              </summary>
+              <pre className="bg-gray-900 text-gray-100 p-3 rounded overflow-x-auto text-xs font-mono max-h-64 overflow-y-auto mt-1">
+                {obj.pythonCode}
+              </pre>
+            </details>
+          )}
+
+          {/* Context Packet for downstream agents */}
+          {obj.contextPacket && (
+            <div>
+              <div className="text-xs font-semibold text-gray-600 mb-1">Context for Downstream:</div>
+              <pre className="bg-blue-50 p-3 rounded border border-blue-200 overflow-x-auto text-xs font-mono">
+                {JSON.stringify(obj.contextPacket, null, 2)}
+              </pre>
+            </div>
+          )}
+
+          {/* Cleaning-specific output */}
+          {obj.cleaningStrategy && (
+            <div>
+              <div className="text-xs font-semibold text-teal-600 mb-1">Cleaning Strategy:</div>
+              <pre className="bg-teal-50 p-3 rounded border border-teal-200 overflow-x-auto text-xs font-mono">
+                {JSON.stringify(obj.cleaningStrategy, null, 2)}
+              </pre>
+            </div>
+          )}
+
+          {obj.transformationLog && obj.transformationLog.length > 0 && (
+            <div>
+              <div className="text-xs font-semibold text-indigo-600 mb-1">Transformations Applied:</div>
+              <ul className="bg-indigo-50 p-3 rounded border border-indigo-200 text-xs space-y-1">
+                {obj.transformationLog.map((log: string, i: number) => (
+                  <li key={i}>• {log}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {obj.cleanedDataRef && (
+            <div>
+              <div className="text-xs font-semibold text-teal-600 mb-1">Cleaned Data Reference:</div>
+              <div className="text-sm font-mono bg-teal-50 p-2 rounded">{obj.cleanedDataRef}</div>
+            </div>
+          )}
+
+          {/* Other fields - exclude common fields and rawOutput */}
+          {Object.keys(obj).filter(key =>
+            !['pythonCode', 'description', 'executionResult', 'contextPacket', 'expectedOutput',
+              'pythonExecutionTime', 'rawOutput', 'dataRef', 'schema', 'qualityIssues',
+              'sampleRows', 'cleaningStrategy', 'transformationLog', 'cleanedDataRef'].includes(key)
+          ).length > 0 && (
+            <div>
+              <div className="text-xs font-semibold text-gray-600 mb-1">Additional Data:</div>
+              <pre className="bg-gray-50 p-3 rounded border border-gray-200 overflow-x-auto text-xs font-mono">
+                {JSON.stringify(
+                  Object.fromEntries(
+                    Object.entries(obj).filter(([key]) =>
+                      !['pythonCode', 'description', 'executionResult', 'contextPacket', 'expectedOutput',
+                        'pythonExecutionTime', 'rawOutput', 'dataRef', 'schema', 'qualityIssues',
+                        'sampleRows', 'cleaningStrategy', 'transformationLog', 'cleanedDataRef'].includes(key)
+                    )
+                  ),
+                  null,
+                  2
+                )}
+              </pre>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // Handle case where we only have rawOutput (backward compatibility)
+    if ('rawOutput' in obj && Object.keys(obj).length === 1) {
+      const rawContent = obj.rawOutput;
+      // Check if rawOutput contains Python code
+      if (typeof rawContent === 'string' && rawContent.includes('```python')) {
+        return (
+          <div className="space-y-2">
+            <div className="text-xs font-semibold text-amber-600 mb-1">
+              ⚠️ Raw Output (Python execution may have failed):
+            </div>
+            <pre className="bg-amber-50 p-3 rounded border border-amber-200 overflow-x-auto text-xs font-mono">
+              {rawContent}
+            </pre>
+          </div>
+        );
+      }
+    }
+  }
+
   // If it's a string, check if it contains code blocks or is structured text
   if (typeof content === 'string') {
     // Check for code blocks (markdown-style)
@@ -101,6 +258,7 @@ const getAgentIcon = (agentId: string) => {
         )
       };
     case 'schema-mapper':
+    case 'summarizer':
       return {
         color: 'bg-purple-500',
         icon: (

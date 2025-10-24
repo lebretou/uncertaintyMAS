@@ -17,8 +17,8 @@ import 'reactflow/dist/style.css';
 
 import { PipelineNode } from './PipelineNode';
 import { NodeInfoPanel } from './NodeInfoPanel';
-import { initialNodes, initialEdges } from '@config/pipelineConfig';
-import { getAgentById } from '@config/agentDefinitions';
+import { generateNodesAndEdges } from '@config/pipelineConfig';
+import { getAgentFromPipeline } from '@config/pipelines';
 import { NodeData } from '@/types';
 import { useNodeStatusStore } from '@services/nodeStatusStore';
 
@@ -26,11 +26,23 @@ const nodeTypes: NodeTypes = {
   default: PipelineNode,
 };
 
-export const PipelineCanvas: React.FC = () => {
-  const [nodes, setNodes] = useState<Node<NodeData>[]>(initialNodes);
-  const [edges, setEdges] = useState<Edge[]>(initialEdges);
+interface PipelineCanvasProps {
+  pipelineId: string;
+}
+
+export const PipelineCanvas: React.FC<PipelineCanvasProps> = ({ pipelineId }) => {
+  const [nodes, setNodes] = useState<Node<NodeData>[]>([]);
+  const [edges, setEdges] = useState<Edge[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const nodeStatuses = useNodeStatusStore((state) => state.nodeStatuses);
+
+  // Generate nodes and edges when pipeline changes
+  useEffect(() => {
+    const { nodes: newNodes, edges: newEdges } = generateNodesAndEdges(pipelineId);
+    setNodes(newNodes);
+    setEdges(newEdges);
+    setSelectedNodeId(null); // Clear selection when pipeline changes
+  }, [pipelineId]);
 
   // Update node statuses when the store changes
   useEffect(() => {
@@ -63,7 +75,7 @@ export const PipelineCanvas: React.FC = () => {
     setSelectedNodeId(null);
   }, []);
 
-  const selectedAgent = selectedNodeId ? getAgentById(selectedNodeId) : null;
+  const selectedAgent = selectedNodeId ? getAgentFromPipeline(pipelineId, selectedNodeId) : null;
 
   return (
     <div className="w-full h-full flex">

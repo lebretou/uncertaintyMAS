@@ -62,4 +62,16 @@ export interface RunConfiguration {
   pipelineId: string;
   csvData: string; // CSV content as string
   csvFileName?: string;
+  userPrompt: string; // User's analytical intent/task
+}
+
+export interface DataContext {
+  dataRef: string; // Reference to the data (e.g., file path or ID)
+  schema: {
+    columns: string[];
+    types: Record<string, string>;
+    rowCount: number;
+  };
+  transformationLog?: string[];
+  userPrompt: string;
 }
